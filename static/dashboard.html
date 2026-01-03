@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Public PC Fleet Dashboard</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; margin: 20px; }
+    .topbar { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+    .pill { padding: 4px 10px; border-radius: 999px; font-weight: 600; }
+    .green { background: #e6ffed; border: 1px solid #b7ebc6; }
+    .yellow { background: #fff7e6; border: 1px solid #ffe0a3; }
+    .red { background: #ffe6e6; border: 1px solid #ffb3b3; }
+
+    table { border-collapse: collapse; width: 100%; margin-top: 14px; }
+    th, td { border-bottom: 1px solid #eee; padding: 10px; text-align: left; vertical-align: top; }
+    th { background: #fafafa; position: sticky; top: 0; z-index: 1; }
+    .muted { color: #666; font-size: 12px; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+    .nowrap { white-space: nowrap; }
+    .right { text-align: right; }
+    button { padding: 8px 10px; border: 1px solid #ddd; background: #fff; border-radius: 8px; cursor: pointer; }
+    button:hover { background: #f7f7f7; }
+    input { padding: 8px 10px; border: 1px solid #ddd; border-radius: 8px; }
+  </style>
+</head>
+<body>
+  <h1>Public PC Fleet Dashboard</h1>
+
+  <div class="topbar">
+    <span id="countGreen" class="pill green">GREEN: 0</span>
+    <span id="countYellow" class="pill yellow">YELLOW: 0</span>
+    <span id="countRed" class="pill red">RED: 0</span>
+
+    <span class="muted">Auto-refresh: <span class="mono">5s</span></span>
+
+    <button id="btnRefresh">Refresh now</button>
+    <button id="btnSetKey">Set API key</button>
+
+    <button id="btnShowAll">All</button>
+    <button id="btnShowGreen">Green</button>
+    <button id="btnShowYellow">Yellow</button>
+    <button id="btnShowRed">Red</button>
+
+    <input id="searchBox" placeholder="Search device (e.g., PUBPC-12)" />
+
+    <span class="muted">API key is stored in your browser (localStorage) for this demo.</span>
+  </div>
+
+  <table>
+    <thead>
+      <tr>
+        <th class="nowrap">Device</th>
+        <th>Status</th>
+        <th>Reasons</th>
+        <th class="right nowrap">Disk %</th>
+        <th class="right nowrap">AV</th>
+        <th class="right nowrap">MyPC Fail/Att</th>
+        <th class="right nowrap">Disk Trend</th>
+        <th class="right nowrap">MyPC Fail Trend</th>
+        <th class="nowrap">Last Check-in</th>
+      </tr>
+    </thead>
+    <tbody id="tbody">
+      <tr><td colspan="9" class="muted">Loading…</td></tr>
+    </tbody>
+  </table>
+
+  <script>
+    const API_DEVICES = "/api/devices";
+    const KEY_NAME = "public_pc_api_key";
+    const REFRESH_MS = 5000;
+    
+    let currentFilter = "all"; // all|green|yellow|red
+    let currentSearch = "";
+   
+    const prevSnapshot = {}; //device_id -> { diskPct, mypcFailures }
+
+    function getKey() {
+      return localStorage.getItem(KEY_NAME);
+    }
+
+    function setKeyInteractive() {
+      const current = getKey() || "";
+      const k = prompt("Enter API key (same as app/main.py API_KEY):", current);
+      if (k && k.trim()) {
+        localStorage.setItem(KEY_NAME, k.trim());
+        alert("Saved. Refreshing now.");
+        refresh();
+      }
+    }
+
+    function statusClass(s) {
+      if (s === "red") return "red";
+      if (s === "yellow") return "yellow";
+      return "green";
+    }
+
+    function safeJsonParse(s, fallback) {
+      try { return JSON.parse(s); } catch { return fallback; }
+    }
+
+    function fmtBool01(n) {
+      // DB stores 0/1 sometimes
+      if (n === 1 || n === true) return "ON";
+      if (n === 0 || n === false) return "OFF";
+      return "—";
+    }
+
+    function setCounts(devs) {
+      let g=0,y=0,r=0;
+      for (const d of devs) {
+        if (d.computed_status === "red") r++;
+        else if (d.computed_status === "yellow") y++;
+        else g++;
+      }
+      document.getElementById("countGreen").textContent = `GREEN: ${g}`;
+      document.getElementById("countYellow").textContent = `YELLOW: ${y}`;
+      document.getElementById("countRed").textContent = `RED: ${r}`;
+    }
+
+    function severityRank(status) {
+      if (status === "red") return 3;
+      if (status === "yellow") return 2;
+      return 1; // green/default
+}
+
+    function arrow(delta) {
+      if (delta > 0) return "UP";
+      if (delta < 0) return "DOWN";
+      return "FLAT";
+}
+
+    function ftmDelta(delta) {
+      if (delta === null || Number.IsNaN(delta)) return "-";
+      const sign = delta > 0 ? "+" : "";
+      return '${sign}${delta}';
+}
+
+    async function refresh() {
+      const tbody = document.getElementById("tbody");
+      const key = getKey();
+
+      if (!key) {
+        tbody.innerHTML = `<tr><td colspan="9" class="muted">No API key set. Click "Set API key".</td></tr>`;
+        return;
+      }
+
+      const res = await fetch(API_DEVICES, {
+        headers: { "x-api-key": key }
+      });
+
+      if (!res.ok) {
+        const txt = await res.text();
+        tbody.innerHTML = `<tr><td colspan="9" class="muted">Error ${res.status}: ${txt}<br/>Check your API key.</td></tr>`;
+        return;
+      }
+
+      const data = await res.json();
+      const devs = data.devices || [];
+
+      let filtered = devs;
+
+      if (currentFilter !== "all") {
+        filtered = filtered.filter(d => (d.computed_status || "green") === currentFilter);
+}
+
+      if (currentSearch) {
+        filtered = filtered.filter(d =>
+          String(d.device_id || "").toLowerCase().includes(currentSearch)
+        );
+}
+
+      filtered.sort((a, b) => {
+        const sa = severityRank(a.computed_status || "green");
+        const sb = severityRank(b.computed_status || "green");
+        if (sb !== sa) return sb -sa;
+        return String(a.device_id).localeCompare(String(b.device_id));
+});
+
+      setCounts(devs);
+
+      if (!devs.length) {
+        tbody.innerHTML = `<tr><td colspan="9" class="muted">No devices yet. Start the simulator.</td></tr>`;
+        return;
+      }
+
+      tbody.innerHTML = filtered.map(d => {
+        const status = d.computed_status || "green";
+        const reasons = safeJsonParse(d.computed_reasons_json || "[]", []);
+        const disk = (d.disk_c_free_pct ?? "—");
+        const av = fmtBool01(d.av_enabled);
+        const fails = d.mypc_auth_failures ?? 0;
+        const atts = d.mypc_auth_attempts ?? 0;
+        const ts = d.timestamp_utc || "—";
+        const diskNum = Number(d.disk_c_free_pct);
+        const failsNum = Number(fails);
+
+        const prev = prevSnapshot[d.device_id];
+        let diskDelta = null;
+        let failDelta = null;
+
+        if (prev) {
+          if (!Number.isNaN(diskNum) && !Number.isNaN(prev.diskPct)) {
+            diskDelta = Math.round((diskNum - prev.diskPct) * 10) / 10;
+        }
+        if (!Number.isNaN(failsNum) && !Number.isNaN(prev.mypcFailures)) {
+          failDelta = failsNum - prev.mypcFailures;
+        }
+}
+
+        return `
+          <tr>
+            <td class="mono nowrap"><a href="/device?id=${encodeURIComponent(d.device_id)}">${d.device_id}</a></td>
+            <td><span class="pill ${statusClass(status)}">${status.toUpperCase()}</span></td>
+            <td>${(reasons.length ? reasons.join("; ") : "<span class='muted'>—</span>")}</td>
+            <td class="right mono">${disk}</td>
+            <td class="right mono">${av}</td>
+            <td class="right mono">${fails}/${atts}</td>
+            <td class="right mono">${diskDelta === null ? "-" : (arrow(diskDelta) + " " + fmtDelta(diskDelta))}</td>
+            <td class="right mono">${failDelta === null ? "-" : (arrow(failDelta) + " " + fmtDelta(failDelta))}</td>
+
+            <td class="mono nowrap">${ts}</td>
+          </tr>
+        `;
+      }).join("");
+
+         for (const d of devs) {
+           prevSnapshot[d.device_id] = {
+             diskPct: Number(d.disk_c_free_pct),
+             mypcFailures: Number(d.mypc_auth_failures ?? 0),
+           };
+
+     }
+}
+
+    document.getElementById("btnRefresh").addEventListener("click", refresh);
+    document.getElementById("btnSetKey").addEventListener("click", setKeyInteractive);
+    document.getElementById("btnShowAll").addEventListener("click", () => { currentFilter = "all"; refresh(); });
+    document.getElementById("btnShowGreen").addEventListener("click", () => { currentFilter = "green"; refresh(); });
+    document.getElementById("btnShowYellow").addEventListener("click", () => { currentFilter = "yellow"; refresh(); });
+    document.getElementById("btnShowRed").addEventListener("click", () => { currentFilter = "red"; refresh(); });
+
+    document.getElementById("searchBox").addEventListener("input", (e) => {
+      currentSearch = (e.target.value || "").trim().toLowerCase();
+      refresh();
+});
+
+    // initial load + auto refresh
+    refresh();
+    setInterval(refresh, REFRESH_MS);
+  </script>
+</body>
+</html>
+

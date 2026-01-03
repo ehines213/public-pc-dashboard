@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Device Detail</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; margin: 20px; }
+    a { color: #0b66c3; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .pill { padding: 4px 10px; border-radius: 999px; font-weight: 700; display: inline-block; }
+    .green { background: #e6ffed; border: 1px solid #b7ebc6; }
+    .yellow { background: #fff7e6; border: 1px solid #ffe0a3; }
+    .red { background: #ffe6e6; border: 1px solid #ffb3b3; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
+    .card { border: 1px solid #eee; border-radius: 12px; padding: 12px; }
+    .muted { color: #666; font-size: 12px; }
+    table { border-collapse: collapse; width: 100%; margin-top: 12px; }
+    th, td { border-bottom: 1px solid #eee; padding: 10px; text-align: left; vertical-align: top; }
+    th { background: #fafafa; }
+    button { padding: 8px 10px; border: 1px solid #ddd; background: #fff; border-radius: 8px; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <div>
+    <a href="/dashboard">← Back to dashboard</a>
+  </div>
+
+  <h1>Device: <span id="deviceId" class="mono"></span></h1>
+
+  <div class="muted">
+    Tip: API key is stored in your browser (localStorage). If this page errors, go back and click “Set API key”.
+  </div>
+
+  <div id="summary" class="grid"></div>
+
+  <h2>Recent Check-ins</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Time (UTC)</th>
+        <th>Status</th>
+        <th>Reasons</th>
+        <th class="mono">Disk%</th>
+        <th class="mono">AV</th>
+        <th class="mono">MyPC Fail/Att</th>
+      </tr>
+    </thead>
+    <tbody id="history">
+      <tr><td colspan="6" class="muted">Loading…</td></tr>
+    </tbody>
+  </table>
+
+  <script>
+    const KEY_NAME = "public_pc_api_key";
+
+    function getKey() { return localStorage.getItem(KEY_NAME); }
+
+    function statusClass(s) {
+      if (s === "red") return "red";
+      if (s === "yellow") return "yellow";
+      return "green";
+    }
+
+    function safeJsonParse(s, fallback) {
+      try { return JSON.parse(s); } catch { return fallback; }
+    }
+
+    function fmtBool01(n) {
+      if (n === 1 || n === true) return "ON";
+      if (n === 0 || n === false) return "OFF";
+      return "—";
+    }
+
+    function qs(name) {
+      return new URLSearchParams(window.location.search).get(name);
+    }
+
+    async function load() {
+      const deviceId = qs("id");
+      document.getElementById("deviceId").textContent = deviceId || "—";
+
+      const key = getKey();
+      if (!deviceId) {
+        document.getElementById("summary").innerHTML = `<div class="card">Missing device id.</div>`;
+        return;
+      }
+      if (!key) {
+        document.getElementById("summary").innerHTML = `<div class="card">No API key set. Go back to dashboard and click “Set API key”.</div>`;
+        return;
+      }
+
+      const res = await fetch(`/api/devices/${encodeURIComponent(deviceId)}?limit=25`, {
+        headers: { "x-api-key": key }
+      });
+
+      if (!res.ok) {
+        const txt = await res.text();
+        document.getElementById("summary").innerHTML = `<div class="card">Error ${res.status}: ${txt}</div>`;
+        return;
+      }
+
+      const data = await res.json();
+      const latest = data.latest;
+      const history = data.history || [];
+
+      const reasons = latest ? safeJsonParse(latest.computed_reasons_json || "[]", []) : [];
+      const status = latest ? (latest.computed_status || "green") : "—";
+
+      document.getElementById("summary").innerHTML = `
+        <div class="card">
+          <div class="muted">Current Status</div>
+          <div style="margin-top:6px;"><span class="pill ${statusClass(status)}">${String(status).toUpperCase()}</span></div>
+          <div style="margin-top:10px;" class="muted">Reasons</div>
+          <div style="margin-top:6px;">${reasons.length ? reasons.join("; ") : "—"}</div>
+        </div>
+        <div class="card">
+          <div class="muted">Key Metrics</div>
+          <div style="margin-top:6px;">
+            <div>Disk Free %: <span class="mono">${latest?.disk_c_free_pct ?? "—"}</span></div>
+            <div>AV: <span class="mono">${fmtBool01(latest?.av_enabled)}</span></div>
+            <div>MyPC Fail/Att: <span class="mono">${latest?.mypc_auth_failures ?? 0}/${latest?.mypc_auth_attempts ?? 0}</span></div>
+            <div>Last Check-in: <span class="mono">${latest?.timestamp_utc ?? "—"}</span></div>
+          </div>
+        </div>
+      `;
+
+      const tbody = document.getElementById("history");
+      if (!history.length) {
+        tbody.innerHTML = `<tr><td colspan="6" class="muted">No history found yet.</td></tr>`;
+        return;
+      }
+
+      tbody.innerHTML = history.map(r => {
+        const rs = safeJsonParse(r.computed_reasons_json || "[]", []);
+        const st = r.computed_status || "green";
+        return `
+          <tr>
+            <td class="mono">${r.timestamp_utc}</td>
+            <td><span class="pill ${statusClass(st)}">${st.toUpperCase()}</span></td>
+            <td>${rs.length ? rs.join("; ") : "<span class='muted'>—</span>"}</td>
+            <td class="mono">${r.disk_c_free_pct ?? "—"}</td>
+            <td class="mono">${fmtBool01(r.av_enabled)}</td>
+            <td class="mono">${r.mypc_auth_failures ?? 0}/${r.mypc_auth_attempts ?? 0}</td>
+          </tr>
+        `;
+      }).join("");
+    }
+
+    load();
+  </script>
+</body>
+</html>
+
